@@ -1,0 +1,163 @@
+---
+title: "NYPD Shooting Project"
+date: "2024-12-06"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## **Project Summary**
+**In this project, we're analyzing NYPD shooting data to understand patterns and trends. Specifically, we aim to examine the distribution of shootings over time, across boroughs, and time of day. The goal of this analysis is to identify potential areas for intervention and inform policy decisions to reduce violence and prepare for it.**
+
+## **Step 1: Import**
+
+**Import the libraries we need and import the data we'll use for the analysis**
+
+```{r libraries, echo=TRUE}
+library(tidyverse)
+library(lubridate)
+```
+
+```{r import_data, echo=TRUE}
+url_in <- "https://data.cityofnewyork.us/api/views/833y-fsy8/rows.csv?accessType=DOWNLOAD"
+shooting_raw_data <- read_csv(url_in)
+```
+
+Here is an overview of the dataset, directly from the website data.gov "This is a breakdown of every shooting incident that occurred in NYC going back to 2006 through the end of the previous calendar year. This data is manually extracted every quarter and reviewed by the Office of Management Analysis and Planning before being posted on the NYPD website. Each record represents a shooting incident in NYC and includes information about the event, the location and time of occurrence. In addition, information related to suspect and victim demographics is also included. This data can be used by the public to explore the nature of shooting/criminal activity. Please refer to the attached data footnotes for additional information about this dataset."
+
+## **Step 2: Transform/Tidy**
+**Here we'll clean and prepare the data for analysis by standardizing date/time formats, handling missing values, and filtering the data to focus on relevant variables..**
+
+Main transformations are standardizing date/hour/time, only selecting the columns we need, and dropping values with no date or no boro data available
+```{r transform_tidy, echo=TRUE}
+shooting_data <- shooting_raw_data %>%
+    mutate(
+        OCCUR_DATE = mdy(OCCUR_DATE),
+        OCCUR_HOUR = hour(hms(OCCUR_TIME)),
+        YEAR = year(OCCUR_DATE)
+    ) %>%
+    select(
+        INCIDENT_KEY, OCCUR_DATE, OCCUR_HOUR, YEAR, BORO, LOC_OF_OCCUR_DESC, PRECINCT, 
+        PERP_AGE_GROUP, PERP_SEX, PERP_RACE, VIC_AGE_GROUP, VIC_SEX, VIC_RACE, 
+        STATISTICAL_MURDER_FLAG,LOC_CLASSFCTN_DESC
+    ) %>%
+    filter(!is.na(OCCUR_DATE), !is.na(BORO))
+```
+
+## **Step 3: Data visualization**
+**We will explore the data visually to identify patterns in shootings over time, by borough, and by demographics.**
+
+**We want to start by understanding patterns in shooting over time.**
+```{r shootings_over_time, echo=TRUE}
+shooting_data %>%
+  count(YEAR) %>%
+  ggplot(aes(x = YEAR, y = n)) +
+  geom_line(size = 1) +
+  labs(
+    title = "Number of Shootings Over Time",
+    x = "Year",
+    y = "Number of Shootings"
+  ) +
+  theme_minimal()
+```
+
+Looks like there was a spike in 2020, my hypothesis is that this has to do with unrest caused by the covid pandemic
+
+
+**Next, lets look at shootings by borough.**
+```{r borough_distribution, echo=TRUE}
+shooting_data %>%
+  count(BORO) %>%
+  ggplot(aes(x = reorder(BORO, -n), y = n, fill = BORO)) +
+  geom_bar(stat = "identity") +
+  labs(
+    title = "Shootings by Borough",
+    x = "Borough",
+    y = "Number of Shootings"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "none")
+```
+
+Looks like certain boroughs have many more shootings than others. My hypothesis is that boroughs with higher shootings have higher economic instability due to lower median income.
+
+
+**Lets combine the two visualizations we previously looked at, and look at shootings per borough over time.**
+```{r borough_distribution_over_time, echo=TRUE}
+shooting_data %>%
+  count(YEAR, BORO) %>%
+  ggplot(aes(x = YEAR, y = n, color = BORO)) +
+  geom_line(size = 1) +
+  labs(
+    title = "Shootings Over Time by Borough",
+    x = "Year",
+    y = "Number of Shootings",
+    color = "Borough"
+  ) +
+  theme_minimal() +
+  theme(
+    legend.position = "right",
+    axis.text.x = element_text(angle = 45, hjust = 1)
+  )
+```
+
+
+**Let's also take a look at shootings by time of day**
+```{r time_of_day, echo=TRUE}
+shooting_data %>%
+  count(OCCUR_HOUR) %>%
+  ggplot(aes(x = OCCUR_HOUR, y = n)) +
+  geom_bar(stat = "identity", fill = "steelblue") +
+  labs(
+    title = "Shootings by Time of Day",
+    x = "Hour of the Day",
+    y = "Number of Shootings"
+  ) +
+  theme_minimal() +
+  scale_x_continuous(breaks = 0:23)
+```
+
+This is interesting, it looks like most shooting occur in the early morning or night... this makes sense.
+
+
+## **Step 4: Model Data**
+**Here I'm creating a model that assumes that shootings are more frequent at the earliest and latest times of the day. I'm layering the data on top of it to prove that the model is directionally accurate. **
+```{r model_time_of_day, echo=TRUE}
+shooting_hourly <- shooting_data %>%
+  count(OCCUR_HOUR)
+
+shooting_hourly <- shooting_hourly %>%
+  mutate(OCCUR_HOUR_SQ = OCCUR_HOUR^2)
+
+poisson_model_quad <- glm(n ~ OCCUR_HOUR + OCCUR_HOUR_SQ, data = shooting_hourly, family = poisson)
+
+shooting_hourly <- shooting_hourly %>%
+  mutate(
+    predicted = predict(poisson_model_quad, type = "response")
+  )
+ggplot(shooting_hourly, aes(x = OCCUR_HOUR)) +
+  geom_point(aes(y = n), color = "blue", size = 3, alpha = 0.7) +
+  geom_line(aes(y = predicted), color = "red", size = 1.2) +
+  labs(
+    title = "Shootings by Time of Day: Observed vs Predicted",
+    x = "Hour of the Day",
+    y = "Number of Shootings"
+  ) +
+  theme_minimal() +
+  theme(
+    legend.position = "none",
+    axis.text.x = element_text(angle = 45, hjust = 1)
+  ) +
+  scale_x_continuous(breaks = 0:23)
+```
+
+# **Potential Bias**
+
+**-Not all shootings are reported/recorded.** This data only captures the shootings that were actually reported/recorded by the NYPD, and doesn't account for shootings that weren't. 
+
+**-Bias in data selection** I chose to do my analysis and base my conclusions on a few variables I found relevant, but its possible that I omitted certain variables that lay at the crux of the issue.
+
+## **Conclusion**
+**In conclusion, it appears that there was a spike in shootings in 2020 due to the Covid pandemic. We did see significant differences in total shootings across Boroughs, likely due to socioeconmic factors. We confirmed that there were spikes in specific Boroughs during 2020, some more than others. Additionally, we found that shootings typically occur in the early morning or night. For a policy maker, I think its important to consider all of these factors. First, they should anticipate that future pandemics/lockdowns might result in an increase in shootings. They should focus more attention on specific boroughs where these types of crimes are more prevalent. They should also look out for these types of crimes more during the night and early mornings.**
