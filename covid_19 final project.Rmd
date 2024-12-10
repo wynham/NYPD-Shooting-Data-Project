@@ -1,0 +1,359 @@
+---
+title: "Final Project"
+date: "2024-12-07"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## **Project Summary**
+**In this project we're analyzing the John's Hopkins Covid19 data. I specifically want to look compare a few countries/states that had notoriously strict lockdown policies to countries/states that had notoriously lenient lockdown polices. My goal is to understand how strict vs. lenient policy affected the number of cases and deaths over time. The goal of this project is to simulate how a policy maker might go about making lockdown decisions for future pandemics.**
+
+## **Step 1: Import**
+
+**Import the libraries we need and import the data we'll use for the analysis**
+
+```{r libraries, echo=TRUE}
+library(tidyverse)
+library(lubridate)
+```
+
+```{r import_data, echo=TRUE}
+url_in <- "https://raw.githubusercontent.com/CSSEGISandData/COVID-19/master/csse_covid_19_data/csse_covid_19_time_series/"
+file_names <- c("time_series_covid19_confirmed_US.csv","time_series_covid19_confirmed_global.csv", "time_series_covid19_deaths_US.csv","time_series_covid19_deaths_global.csv")
+urls <- str_c(url_in,file_names)
+global_cases <- read_csv(urls[2])
+global_deaths <- read_csv(urls[4])
+US_cases <- read_csv(urls[1])
+US_deaths <- read_csv(urls[3])
+uid_lookup_url <- "https://raw.githubusercontent.com/CSSEGISandData/COVID-19/master/csse_covid_19_data/UID_ISO_FIPS_LookUp_Table.csv"
+uid <- read_csv(uid_lookup_url) %>%
+  select(-c(Lat, Long_, Combined_Key, code3, iso2, iso3, Admin2))
+```
+
+Description of the dataset from the Github source page: 'contains daily time series summary tables, including confirmed, deaths and recovered. All data is read in from the daily case report. The time series tables are subject to be updated if inaccuracies are identified in our historical data.' 
+
+
+## **Step 2: Transform/Tidy**
+**Here we'll transform and tidy up data for analysis. Remove unnecessary columns, pivot the time series data, and join the data as needed. The end goal here is to make the data ready for visualization, analysis, and modeling.**
+
+Let's start with the global data.
+```{r format_global_data, echo=TRUE}
+global_cases <- global_cases %>%
+  pivot_longer(
+    cols = -c(`Province/State`, `Country/Region`, Lat, Long),
+    names_to = "date",
+    values_to = "cases"
+  ) %>%
+  select(-c(Lat, Long))
+
+global_deaths <- global_deaths %>%
+  pivot_longer(
+    cols = -c(`Province/State`, `Country/Region`, Lat, Long),
+    names_to = "date",
+    values_to = "deaths"
+  ) %>%
+  select(-c(Lat, Long))
+
+global <- global_cases %>%
+  full_join(global_deaths) %>%
+  rename(
+    Country_Region = `Country/Region`,
+    Province_State = `Province/State`
+  ) %>%
+  mutate(date = mdy(date))
+
+global <- global_cases %>%
+  full_join(global_deaths) %>%
+  rename(
+    Country_Region = `Country/Region`,
+    Province_State = `Province/State`
+  ) %>%
+  mutate(date = mdy(date))
+
+global <- global %>%
+  unite("Combined_Key",
+        c(Province_State, Country_Region),
+        sep = ", ",
+        na.rm = TRUE,
+        remove = FALSE)
+
+global <- global %>%
+  left_join(uid, by = c("Province_State","Country_Region")) %>%
+  select(-c(UID, FIPS)) %>%
+  select(Province_State, Country_Region, date, cases, deaths, Population, Combined_Key)
+
+# aggregate data at the country level
+global <- global %>%
+  group_by(Country_Region, date) %>%
+  summarize(
+    cases = sum(cases, na.rm = TRUE),
+    deaths = sum(deaths, na.rm = TRUE),
+    # aggregate population based on presence of Province_State- we need to do this because there are countries that are broken out by state, and some countries are not. We don't want to sum pop in countries that don't have it broken out by state
+    Population = if (all(is.na(Province_State))) {
+      max(Population, na.rm = TRUE) # if no Province/State, take max (country-level value)
+    } else {
+      sum(Population, na.rm = TRUE) # if Province/State exists, sum the population
+    }
+  ) %>%
+  ungroup()
+
+# calculate per-million metrics
+global <- global %>%
+  mutate(
+    deaths_per_mill = deaths * 1000000 / Population,
+    cases_per_mill = cases * 1000000 / Population
+  )
+
+#lets look at the data high level
+global
+summary(global)
+
+```
+
+```{r format_US_data, echo=TRUE}
+US_cases <- US_cases %>%
+  pivot_longer(
+    cols = -(UID:Combined_Key),
+    names_to = "date",
+    values_to = "cases"
+  ) %>%
+  select(Admin2:cases) %>%
+  mutate(date = mdy(date)) %>%
+  select(-c(Lat, Long_))
+US_deaths <- US_deaths %>%
+  pivot_longer(
+    cols = -(UID:Population),
+    names_to = "date",
+    values_to = "deaths"
+  ) %>%
+  select(Admin2:deaths) %>%
+  mutate(date = mdy(date)) %>%
+  select(-c(Lat, Long_))
+US <- US_cases %>%
+  full_join(US_deaths)
+US_by_state <- US %>%
+  group_by(Province_State, Country_Region, date) %>%
+  summarize(
+    cases = sum(cases), 
+    deaths = sum(deaths), 
+    Population = sum(Population)
+  ) %>%
+  mutate(
+    deaths_per_mill = deaths * 1000000 / Population,
+    cases_per_mill = cases * 1000000 / Population
+  ) %>%
+  select(
+    Province_State,
+    Country_Region,
+    date,
+    cases,
+    deaths,
+    deaths_per_mill,
+    cases_per_mill,
+    Population
+  ) %>%
+  ungroup()
+
+#lets look at the data high level
+US_by_state
+summary(US_by_state)
+
+```
+
+
+## **Step 3: Data visualization section**
+**In this section we'll visualize a couple of examples of strict vs. lenient countries with regard to covid lockdown policies.**
+
+Let's first compare at the country level, Sweden and Australia.
+```{r visualize_country_cases_deaths, echo=TRUE} 
+# filter data for Australia and Sweden
+global %>%
+  filter(Country_Region %in% c("Australia", "Sweden")) %>%
+  filter(cases > 0) %>%
+  ggplot(aes(x = date)) +
+  # Plot Australia cases
+  geom_line(
+    data = . %>% filter(Country_Region == "Australia"),
+    aes(y = cases_per_mill, color = "Australia", linetype = "Cases"),
+    size = 1
+  ) +
+  # plot Australia deaths
+  geom_line(
+    data = . %>% filter(Country_Region == "Australia"),
+    aes(y = deaths_per_mill, color = "Australia", linetype = "Deaths"),
+    size = 1
+  ) +
+  # plot Sweden cases
+  geom_line(
+    data = . %>% filter(Country_Region == "Sweden"),
+    aes(y = cases_per_mill, color = "Sweden", linetype = "Cases"),
+    size = 1
+  ) +
+  # plot Sweden deaths
+  geom_line(
+    data = . %>% filter(Country_Region == "Sweden"),
+    aes(y = deaths_per_mill, color = "Sweden", linetype = "Deaths"),
+    size = 1
+  ) +
+  scale_color_manual(
+    values = c("Australia" = "blue", "Sweden" = "red")
+  ) +
+  scale_linetype_manual(
+    values = c("Cases" = "solid", "Deaths" = "dotted")
+  ) +
+  # customize y axis to use a log scale for better comparison
+  scale_y_log10() +
+  theme_minimal() +
+  theme(
+    legend.position = "bottom",
+    axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1),
+    legend.title = element_blank()
+  ) +
+  labs(
+    title = "COVID-19 Cases and Deaths per Million in Australia and Sweden",
+    x = "Date",
+    y = "Rate per Million (log scale)"
+  )
+```
+
+
+Next we'll compare a couple of states, Hawaii and South Dakota
+```{r visualize_state_cases_deaths, echo=TRUE} 
+US_by_state %>%
+  filter(Province_State %in% c("Hawaii", "South Dakota")) %>%
+  filter(cases > 0) %>%
+  ggplot(aes(x = date)) +
+  geom_line(
+    data = . %>% filter(Province_State == "Hawaii"),
+    aes(y = cases_per_mill, color = "Hawaii", linetype = "Cases"),
+    linewidth = 1
+  ) +
+  geom_line(
+    data = . %>% filter(Province_State == "Hawaii"),
+    aes(y = deaths_per_mill, color = "Hawaii", linetype = "Deaths"),
+    linewidth = 1
+  ) +
+  geom_line(
+    data = . %>% filter(Province_State == "South Dakota"),
+    aes(y = cases_per_mill, color = "South Dakota", linetype = "Cases"),
+    linewidth = 1
+  ) +
+  geom_line(
+    data = . %>% filter(Province_State == "South Dakota"),
+    aes(y = deaths_per_mill, color = "South Dakota", linetype = "Deaths"),
+    linewidth = 1
+  ) +
+  scale_color_manual(
+    values = c("Hawaii" = "blue", "South Dakota" = "red")
+  ) +
+  scale_linetype_manual(
+    values = c("Cases" = "solid", "Deaths" = "dotted")
+  ) +
+  scale_y_log10() +
+  theme_minimal() +
+  theme(
+    legend.position = "bottom",
+    axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1),
+    legend.title = element_blank()
+  ) +
+  # Add labels and title
+  labs(
+    title = "COVID-19 Cases and Deaths per Million in Hawaii and South Dakota",
+    x = "Date",
+    y = "Rate per Million (log scale)"
+  )
+```
+
+**These visualizations are interesting. In both examples, the more lenient entities started with a lot more cases, but over time, the more strict ones caught up. However for deaths, the strict entities, never caught up.**
+
+
+## **Step 4: Data analysis section**
+**We want to do a high level analysis of cases and deaths per thousand in our countries/states of interest**
+
+Let's compare Sweden and Australia
+```{r country_analysis, echo=TRUE}
+country_totals <- global %>%
+  group_by(Country_Region) %>%
+  summarize(
+    deaths = max(deaths, na.rm = TRUE),
+    cases = max(cases, na.rm = TRUE),
+    population = max(Population, na.rm = TRUE),
+    cases_per_thou = 1000 * cases / population,
+    deaths_per_thou = 1000 * deaths / population
+  ) %>%
+  ungroup()
+
+country_totals %>%
+  filter(Country_Region %in% c("Sweden", "Australia")) %>%
+  print()
+```
+
+Let's compare Hawaii and South Dakota
+```{r state_analysis, echo=TRUE}
+US_state_totals <- US_by_state %>%
+  group_by(Province_State) %>%
+  summarize(
+    deaths = max(deaths, na.rm = TRUE),
+    cases = max(cases, na.rm = TRUE),
+    population = max(Population, na.rm = TRUE),
+    cases_per_thou = 1000 * cases / population,
+    deaths_per_thou = 1000 * deaths / population
+  ) %>%
+  ungroup()
+
+US_state_totals %>%
+  filter(Province_State %in% c("Hawaii", "South Dakota")) %>%
+  print()
+```
+
+
+I'm not surprised that the lenient countries/states had many more deaths per thousand. Its interesting that the number of cases isn't that different. In fact, Australia actually has more than Sweden, which is a bit counter intuitive
+
+
+## **Step 5: Modeling Section**
+**For modeling, we want to do a deeper dive into the relationship between cases and deaths.**
+
+Lets start with global:
+```{r global_model, echo=TRUE}
+global_mod <- lm(deaths_per_thou ~ cases_per_thou, data = country_totals)
+global_tot_w_pred <- country_totals %>% mutate(pred = predict(global_mod))
+global_tot_w_pred %>%
+  ggplot() +
+  geom_point(aes(x = cases_per_thou, y = deaths_per_thou), color = "blue") +
+  geom_point(aes(x = cases_per_thou, y = pred), color = "red")
+```
+
+
+Next, we'll look at the US states specifically:
+```{r state_model, echo=TRUE}
+US_state_totals_clean <- US_state_totals %>%
+  filter(
+    !is.na(cases_per_thou) & !is.na(deaths_per_thou) & 
+    is.finite(cases_per_thou) & is.finite(deaths_per_thou)
+  )
+state_mod <- lm(deaths_per_thou ~ cases_per_thou, data = US_state_totals_clean)
+US_state_totals_with_pred <- US_state_totals_clean %>%
+  mutate(pred = predict(state_mod))
+
+US_state_totals_with_pred %>%
+  ggplot() +
+  geom_point(aes(x = cases_per_thou, y = deaths_per_thou), color = "blue") +
+  geom_point(aes(x = cases_per_thou, y = pred), color = "red")
+```
+
+**No surprise here, in both global and US, more cases have a positive correlation with more deaths. It'd be interesting to understand- in the examples we looked at, over time the cases were similar in strict and lenient countries/states, but the deaths were much higher in the lenient countries/states and the strict countries/states never closed the gap, even though they caught up in cases... why is that?**
+
+
+## **Potential Bias**
+
+**-Different administrations/countries/states might have different ways of reporting Covid cases or deaths.** For example, if someone gets Covid, but then dies of pneumonia, one country might report that as a Covid death because the Covid caused the pneumonia, but another country might not report it as a Covid death because the final cause of death was pneumonia.
+
+**-Additionally, cultural differences might lead to individuals not reporting cases of Covid.** For example, if people in a country don't view Covid as a big deal, perhaps they won't report that they have it even if they do.
+
+**-Bias in data selection** I chose to do my analysis on a couple of countries and states that I knew had either strict or lenient lockdown policies. However, for a future iteration, it'd probably make more sense to bring in a dataset that shows the strictness/leniency for every country/state, so I can get the full picture.
+
+## **Conclusion**
+**In conclusion, countries/states with more strict lockdown policies had less cases in the beginning, but ended up catching up towards the end. The important piece to call out though is they maintained less deaths throughout. For a policy maker making decisions about future pandemics, it's important for them to consider that long term, being more strict will result in less deaths, but won't have a big effect on the number of cases. They'll need to weigh the impact of increase in deaths vs. decrease in economic activity and quality of life in their respective countries**
